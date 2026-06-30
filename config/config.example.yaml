@@ -1,0 +1,219 @@
+# Security Assessment Workflow Configuration
+
+# API Configuration
+api:
+  anthropic_api_key: "your-anthropic-api-key-here"
+  model: "claude-3-5-sonnet-20241022"
+  max_tokens: 4096
+  temperature: 0.7
+
+# MCP Server Configuration
+mcp:
+  enabled: true
+  servers:
+    nmap:
+      port: 5001
+      host: "localhost"
+    zap:
+      port: 5002
+      host: "localhost"
+    metasploit:
+      port: 5003
+      host: "localhost"
+    tools:
+      port: 5004
+      host: "localhost"
+
+# Tool Configurations
+tools:
+  nmap:
+    path: "/usr/bin/nmap"
+    default_options: "-sV -sC -O"
+    timing_template: "T4"
+    max_scan_time: 1800  # 30 minutes
+    nse_scripts:
+      - "vuln"
+      - "exploit"
+      - "auth"
+      - "discovery"
+    output_formats:
+      - "xml"
+      - "json"
+  
+  zap:
+    api_key: "your-zap-api-key"
+    proxy_host: "localhost"
+    proxy_port: 8080
+    api_port: 8090
+    timeout: 3600
+    spider_max_depth: 5
+    active_scan: true
+    passive_scan: true
+    ajax_spider: true
+    context_name: "Default Context"
+  
+  metasploit:
+    host: "localhost"
+    port: 55553
+    username: "msf"
+    password: "your-msf-password"
+    ssl: true
+    timeout: 300
+    workspace: "security_assessment"
+  
+  gobuster:
+    path: "/usr/bin/gobuster"
+    wordlist: "/usr/share/wordlists/dirb/common.txt"
+    threads: 50
+    timeout: 600
+    extensions:
+      - "php"
+      - "html"
+      - "js"
+      - "txt"
+      - "json"
+  
+  hping:
+    path: "/usr/sbin/hping3"
+    default_count: 100
+    timeout: 60
+  
+  wafw00f:
+    path: "/usr/local/bin/wafw00f"
+    timeout: 120
+
+# CVE and Exploit Database Configuration
+vulnerability_databases:
+  nvd:
+    api_key: "your-nvd-api-key"
+    enabled: true
+  exploit_db:
+    enabled: true
+    local_path: "/usr/share/exploitdb"
+  shodan:
+    api_key: "your-shodan-api-key"
+    enabled: false
+
+# Workflow Configuration
+workflow:
+  max_concurrent_scans: 3
+  timeout: 7200  # 2 hours
+  auto_exploit: false  # DANGEROUS: Set to true only in controlled environments
+  retry_attempts: 3
+  retry_delay: 5
+  
+  stages:
+    reconnaissance:
+      enabled: true
+      priority: 1
+    vulnerability_assessment:
+      enabled: true
+      priority: 2
+    exploitation:
+      enabled: false  # Requires explicit authorization
+      priority: 3
+    post_exploitation:
+      enabled: false
+      priority: 4
+    reporting:
+      enabled: true
+      priority: 5
+
+# AI Orchestration
+ai_orchestration:
+  enabled: true
+  decision_making:
+    confidence_threshold: 0.7
+    max_iterations: 10
+  analysis:
+    deep_analysis: true
+    correlation: true
+    risk_scoring: true
+
+# Safety and Ethics
+safety:
+  require_authorization: true
+  authorization_file: "config/authorization.txt"
+  rate_limiting:
+    enabled: true
+    max_requests_per_minute: 60
+  blacklist:
+    - "localhost"
+    - "127.0.0.1"
+    - "::1"
+  whitelist_only: false
+  whitelist: []
+  
+  exploit_restrictions:
+    require_confirmation: true
+    max_severity: "medium"  # low, medium, high, critical
+    forbidden_exploits:
+      - "dos"
+      - "destructive"
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "logs/security_assessment.log"
+  max_size: "100MB"
+  backup_count: 5
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  console_output: true
+
+# Reporting Configuration
+reporting:
+  output_dir: "reports"
+  formats:
+    - "html"
+    - "pdf"
+    - "json"
+    - "markdown"
+  include_screenshots: true
+  include_raw_data: true
+  executive_summary: true
+  technical_details: true
+  remediation_recommendations: true
+  risk_matrix: true
+
+# Database Configuration (for storing results)
+database:
+  type: "sqlite"  # sqlite, postgresql, mysql
+  path: "data/security_assessment.db"
+  # For PostgreSQL/MySQL:
+  # host: "localhost"
+  # port: 5432
+  # username: "user"
+  # password: "password"
+  # database: "security_assessment"
+
+# Notification Configuration
+notifications:
+  enabled: false
+  email:
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    username: "your-email@gmail.com"
+    password: "your-app-password"
+    recipients:
+      - "security-team@example.com"
+  slack:
+    webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+  discord:
+    webhook_url: "https://discord.com/api/webhooks/YOUR/WEBHOOK"
+
+# Performance Configuration
+performance:
+  max_memory_mb: 4096
+  max_cpu_percent: 80
+  cache_enabled: true
+  cache_ttl: 3600
+
+# Advanced Options
+advanced:
+  debug_mode: false
+  verbose_output: false
+  save_intermediate_results: true
+  parallel_execution: true
+  custom_scripts_dir: "scripts"
+
+# Made with Bob
