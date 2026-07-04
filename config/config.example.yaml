@@ -133,7 +133,7 @@ ai_orchestration:
 # Safety and Ethics
 safety:
   require_authorization: true
-  authorization_file: "config/authorization.txt"
+  authorization_file: "config/authorized_targets.txt"
   rate_limiting:
     enabled: true
     max_requests_per_minute: 60
