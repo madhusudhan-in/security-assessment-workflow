@@ -309,8 +309,9 @@ class CVELookup:
             if 'cpe' in service and service['cpe']:
                 cves = self.search_by_cpe(service['cpe'][0] if isinstance(service['cpe'], list) else service['cpe'])
             # Fall back to product search
-            elif 'product' in service and 'version' in service:
-                vendor = service.get('vendor', service.get('product', '').split()[0])
+            elif service.get('product') and service.get('version'):
+                parts = service['product'].split()
+                vendor = service.get('vendor', parts[0] if parts else service['product'])
                 cves = self.search_by_product(vendor, service['product'], service['version'])
             else:
                 cves = []
