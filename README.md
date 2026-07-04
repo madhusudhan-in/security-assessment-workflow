@@ -1,254 +1,288 @@
-# Security Assessment Workflow with GenAI
+# AI-Orchestrated Security Assessment Workflow
 
-An enterprise-level security assessment automation framework using GenAI, MCP (Model Context Protocol), and integrated security tools.
+An open-source framework where a large language model sequences Nmap, ZAP, and Metasploit through the Model Context Protocol — with authorization gates and audit logging built in from the start.
 
-## 🎯 Overview
+> **Authorized use only.** Every capability in this framework is intended exclusively for systems you have written permission to test. The exploitation pipeline is off by default and requires both a configuration flag and a runtime authorization file to activate.
 
-This project provides an intelligent security assessment workflow that:
-- Performs automated network reconnaissance using Nmap
-- Discovers vulnerabilities and CVEs
-- Attempts exploit validation
-- Analyzes web application security with OWASP ZAP
-- Integrates with Metasploit for exploit testing
-- Runs additional security tools (Gobuster, Hping, WafWoof, etc.)
-- Uses AI to orchestrate and analyze results
+---
 
-## 🏗️ Architecture
+## How it works
+
+The framework models a security assessment as four sequential stages. An AI decision point sits between every stage — the engine packages accumulated findings as JSON, sends a structured prompt to Claude, and uses the response to drive the next action. Engineers spend their time on findings, not logistics.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Orchestration Layer                                    │
+│  WorkflowEngine · Claude (Anthropic) · Risk scoring    │
+└────────────────────────┬────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────┐
+│  MCP Protocol Layer  (typed tool contracts)             │
+│  nmap_server · zap_server · metasploit_server           │
+│  auxiliary_tools_server  (Gobuster/Hping3/WafWoof)      │
+│  Per-tool rate limiting · Structured JSON endpoints     │
+└────────────────────────┬────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────┐
+│  Wrapper & Utility Layer  (clean Python interfaces)     │
+│  NmapWrapper · ZAPWrapper · MetasploitWrapper           │
+│  CVELookup (NVD API) · ExploitSearch (searchsploit)     │
+└────────────────────────┬────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────────┐
+│  Tool Layer  (executables)                              │
+│  Nmap · OWASP ZAP · Metasploit · Gobuster               │
+│  Hping3 · WafWoof                                       │
+└─────────────────────────────────────────────────────────┘
+```
+
+### The four stages
+
+| # | Stage | What runs | AI role |
+|---|---|---|---|
+| 1 | **Reconnaissance** | Nmap full scan, OS fingerprint, NSE vuln scripts | Prioritizes services, flags unusual port combinations |
+| 2 | **Vulnerability Assessment** | NVD CVE lookup (concurrent, semaphore-bounded), searchsploit, OWASP ZAP for HTTP/HTTPS ports | Produces ranked risk matrix with attack-chain hypotheses |
+| 3 | **Controlled Exploitation** *(opt-in)* | Metasploit check mode → operator approval prompt → live run | Ranks exploits by success probability and reversibility; selects up to 3 |
+| 4 | **Reporting** | AI synthesis across all findings | Writes `reports/<id>.json` and `reports/<id>.md` with risk score 0–10 and remediation checklist |
+
+---
+
+## Safety controls
+
+**Authorization file** (`config/authorized_targets.txt`) — checked before any tool is invoked. Supports exact hostnames, IP addresses, CIDR blocks, and wildcard patterns. Unrecognized targets are rejected immediately.
+
+**Exploitation gate** — `auto_exploit` defaults to `false`. The exploitation stage is only reached when both `--mode aggressive` is passed *and* `auto_exploit: true` is set in config. Even then, Metasploit runs `exploit.check()` first; a live run only proceeds after the operator types `yes` at the interactive prompt.
+
+**MCP rate limiting** — every MCP server enforces a per-minute request ceiling (configurable via env vars) so the AI cannot flood the target with scan requests.
+
+**Credential isolation** — `ANTHROPIC_API_KEY` and `NVD_API_KEY` are read exclusively from environment variables. No secrets appear in config files or source code.
+
+**Rotating audit log** — every tool call, AI prompt, and config read is written to a `RotatingFileHandler` log at the MCP boundary.
+
+---
+
+## Repository layout
 
 ```
 security-assessment-workflow/
+├── config/
+│   ├── config.example.yaml        # Copy to config.yaml and fill in
+│   └── authorized_targets.txt     # One target per line — required before any scan
+├── reports/                       # Auto-created; JSON + Markdown reports written here
 ├── src/
-│   ├── mcp_servers/          # MCP server implementations
-│   │   ├── nmap_server.py
-│   │   ├── zap_server.py
-│   │   ├── metasploit_server.py
-│   │   └── tools_server.py
-│   ├── skills/               # AI Skills for each tool
-│   │   ├── nmap_skill.py
-│   │   ├── zap_skill.py
-│   │   ├── metasploit_skill.py
-│   │   └── auxiliary_tools_skill.py
-│   ├── orchestrator/         # AI orchestration layer
-│   │   ├── workflow_engine.py
-│   │   └── decision_maker.py
-│   ├── utils/                # Utility functions
-│   │   ├── cve_lookup.py
-│   │   ├── exploit_search.py
-│   │   └── report_generator.py
-│   └── tools/                # Tool wrappers
-│       ├── nmap_wrapper.py
-│       ├── zap_wrapper.py
-│       └── metasploit_wrapper.py
-├── config/                   # Configuration files
-├── reports/                  # Generated reports
-├── logs/                     # Application logs
-├── tests/                    # Unit and integration tests
-└── docs/                     # Documentation
-
+│   ├── mcp_servers/
+│   │   ├── nmap_server.py         # 7 Nmap endpoints + rate limiter
+│   │   ├── zap_server.py          # 4 ZAP endpoints + rate limiter
+│   │   ├── metasploit_server.py   # search / check / module info / sessions
+│   │   └── auxiliary_tools_server.py  # Gobuster · Hping3 · WafWoof
+│   ├── orchestrator/
+│   │   ├── workflow_engine_improved.py  # Primary engine (use this)
+│   │   └── workflow_engine.py           # Original engine
+│   ├── tools/
+│   │   ├── nmap_wrapper.py
+│   │   ├── zap_wrapper.py
+│   │   └── metasploit_wrapper.py
+│   └── utils/
+│       ├── cve_lookup.py          # NVD API v2 client
+│       └── exploit_search.py      # searchsploit + GitHub
+└── requirements.txt
 ```
 
-## 🔧 Prerequisites
+---
 
-### Required Tools
-- Python 3.10+
-- Nmap (with NSE scripts)
-- OWASP ZAP
-- Metasploit Framework
-- Gobuster
-- Hping3
-- WafWoof
-- Docker (optional, for containerized deployment)
+## Prerequisites
 
-### Python Dependencies
-- anthropic (for Claude API)
-- mcp (Model Context Protocol)
-- python-nmap
-- zaproxy
-- pymetasploit3
-- requests
-- aiohttp
-- pydantic
-
-## 📦 Installation
-
-### 1. Clone the repository
-```bash
-git clone <repository-url>
-cd security-assessment-workflow
-```
-
-### 2. Install Python dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Install security tools (Ubuntu/Debian)
+**System tools** (install once):
 ```bash
 # Nmap
 sudo apt-get install nmap
 
-# OWASP ZAP
-wget https://github.com/zaproxy/zaproxy/releases/download/v2.14.0/ZAP_2.14.0_Linux.tar.gz
-tar -xvf ZAP_2.14.0_Linux.tar.gz
-
-# Metasploit
-curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall
-chmod 755 msfinstall
-./msfinstall
-
-# Additional tools
+# Gobuster and Hping3
 sudo apt-get install gobuster hping3
+
+# WafWoof
 pip install wafw00f
+
+# OWASP ZAP — download from https://www.zaproxy.org/download/
+
+# Metasploit Framework
+curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall
+chmod 755 msfinstall && sudo ./msfinstall
 ```
 
-### 4. Configure the application
+**Python 3.10+** with packages from `requirements.txt`:
+
+| Package | Purpose |
+|---|---|
+| `anthropic` | Claude API client |
+| `mcp` | Model Context Protocol server/client |
+| `python-nmap` | Nmap Python bindings |
+| `python-owasp-zap-v2.4` | ZAP REST API client |
+| `pymetasploit3` | Metasploit RPC client |
+| `requests` | HTTP for NVD / Exploit-DB |
+| `pyyaml` | Config file parsing |
+
+---
+
+## Quick start
+
 ```bash
+# 1. Clone
+git clone https://github.com/madhusudhan-in/security-assessment-workflow.git
+cd security-assessment-workflow
+
+# 2. Virtual environment
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Credentials — never put these in config files
+export ANTHROPIC_API_KEY="sk-ant-..."
+export NVD_API_KEY="your-nvd-key"
+
+# 4. Config
 cp config/config.example.yaml config/config.yaml
-# Edit config.yaml with your settings
+# Edit config.yaml — set tool paths, ZAP api_key, Metasploit credentials
+
+# 5. Authorize your target
+echo "127.0.0.1" >> config/authorized_targets.txt
+
+# 6. Run a quick scan (recon + report only, ~5–15 min)
+python src/orchestrator/workflow_engine_improved.py \
+    --target 127.0.0.1 \
+    --mode quick \
+    --config config/config.yaml
 ```
 
-## 🚀 Usage
+On completion two files are written to `reports/`:
+- `workflow_<id>.json` — full `WorkflowResult` dataclass (findings, CVEs, risk score, metadata)
+- `workflow_<id>.md` — Markdown executive summary with numbered remediation checklist
 
-### Basic Workflow
+---
+
+## Scan modes
+
+| Mode | Stages | Typical duration |
+|---|---|---|
+| `quick` | Reconnaissance → Reporting | 5–15 min |
+| `full` | Reconnaissance → Vulnerability Assessment → Reporting | 30–60 min |
+| `aggressive` | All four stages — exploitation only if `auto_exploit: true` | 1–3 hr |
+
 ```bash
-python src/orchestrator/workflow_engine.py --target <target-ip-or-domain> --mode full
+# Full scan
+python src/orchestrator/workflow_engine_improved.py \
+    --target 192.168.1.10 --mode full --config config/config.yaml
+
+# Aggressive (exploitation gate active — requires authorized_targets.txt entry
+# AND auto_exploit: true in config.yaml)
+python src/orchestrator/workflow_engine_improved.py \
+    --target 192.168.1.10 --mode aggressive --config config/config.yaml
 ```
 
-### Individual Tool Execution
-```bash
-# Nmap scan
-python src/tools/nmap_wrapper.py --target 192.168.1.1
+---
 
-# ZAP scan
-python src/tools/zap_wrapper.py --target http://example.com
+## Authorization file format
 
-# Metasploit
-python src/tools/metasploit_wrapper.py --exploit <exploit-name> --target <target>
+`config/authorized_targets.txt` — one entry per line, `#` for comments:
+
+```
+# Exact IP
+192.168.1.10
+
+# CIDR block
+10.0.0.0/24
+
+# Exact hostname
+testlab.example.com
+
+# Wildcard
+*.pentest.lab
 ```
 
-### MCP Server Mode
-```bash
-# Start MCP servers
-python src/mcp_servers/nmap_server.py
-python src/mcp_servers/zap_server.py
-python src/mcp_servers/metasploit_server.py
-```
+The workflow engine checks this file before any stage runs. If the target does not match any entry, the run exits immediately with an authorization error.
 
-## 🔐 Security & Ethics
+---
 
-**⚠️ IMPORTANT: This tool is for authorized security testing only!**
+## Enabling ZAP web scanning
 
-- Always obtain written permission before testing
-- Use only in controlled environments
-- Follow responsible disclosure practices
-- Comply with local laws and regulations
-- Never use for malicious purposes
+Set `enabled: true` and provide `api_key` in `config/config.yaml`:
 
-## 📊 Workflow Stages
-
-### Stage 1: Reconnaissance
-1. Nmap port scanning
-2. Service version detection
-3. OS fingerprinting
-4. NSE script execution
-
-### Stage 2: Vulnerability Assessment
-1. CVE lookup for discovered services
-2. Exploit database search
-3. ZAP web vulnerability scanning
-4. Custom vulnerability checks
-
-### Stage 3: Exploitation (Controlled)
-1. Metasploit exploit selection
-2. Exploit validation
-3. Proof-of-concept execution
-4. Impact assessment
-
-### Stage 4: Additional Testing
-1. Directory brute-forcing (Gobuster)
-2. WAF detection (WafWoof)
-3. Network stress testing (Hping)
-4. Custom tool execution
-
-### Stage 5: Reporting
-1. Result aggregation
-2. Risk scoring
-3. Remediation recommendations
-4. Executive summary generation
-
-## 🤖 AI Integration
-
-The system uses GenAI for:
-- Intelligent tool selection
-- Result interpretation
-- Attack chain planning
-- Anomaly detection
-- Report generation
-
-## 📝 Configuration
-
-Edit `config/config.yaml`:
 ```yaml
-api:
-  anthropic_api_key: "your-api-key"
-  
 tools:
-  nmap:
-    path: "/usr/bin/nmap"
-    default_options: "-sV -sC"
   zap:
+    enabled: true
     api_key: "your-zap-api-key"
-    proxy: "http://localhost:8080"
-  metasploit:
-    host: "localhost"
-    port: 55553
-    
+    proxy_host: "localhost"
+    proxy_port: 8080
+```
+
+ZAP is automatically invoked for any port where Nmap detects an HTTP or HTTPS service.
+
+---
+
+## Enabling exploitation (aggressive mode)
+
+Two explicit actions are required:
+
+```yaml
+# config/config.yaml
 workflow:
-  max_concurrent_scans: 3
-  timeout: 3600
-  auto_exploit: false  # Set to true for automatic exploitation
+  auto_exploit: true   # Step 1 — config flag
 ```
 
-## 🧪 Testing
-
-```bash
-# Run unit tests
-pytest tests/unit/
-
-# Run integration tests
-pytest tests/integration/
-
-# Run full test suite
-pytest tests/
+```
+# config/authorized_targets.txt
+192.168.1.10           # Step 2 — authorization file entry
 ```
 
-## 📚 Documentation
+When both are set and `--mode aggressive` is passed, the engine:
+1. Calls `exploit.check()` (read-only probe — no damage)
+2. Prints the result and waits for operator input
+3. Only calls `exploit.execute()` if the operator types `yes`
 
-- [Architecture Guide](docs/architecture.md)
-- [API Reference](docs/api_reference.md)
-- [Tool Integration Guide](docs/tool_integration.md)
-- [Security Best Practices](docs/security_practices.md)
+---
 
-## 🤝 Contributing
+## Adding a new tool
 
-Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) first.
+Three files, zero orchestrator changes:
 
-## 📄 License
+```python
+# 1. src/tools/nuclei_wrapper.py
+class NucleiWrapper:
+    def scan(self, target: str, templates: list[str]) -> NucleiResult: ...
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+# 2. src/mcp_servers/nuclei_server.py
+@app.list_tools()
+async def list_tools():
+    return [Tool(name="nuclei_template_scan", ...)]
 
-## ⚠️ Disclaimer
+@app.call_tool()
+async def call_tool(name, arguments):
+    if name == "nuclei_template_scan":
+        return wrapper.scan(arguments["target"], arguments["templates"]).to_dict()
 
-This tool is provided for educational and authorized security testing purposes only. The authors and contributors are not responsible for any misuse or damage caused by this tool. Users must ensure they have proper authorization before conducting any security assessments.
+# 3. config/config.yaml
+# tools:
+#   nuclei:
+#     path: /usr/local/bin/nuclei
+```
 
-## 🙏 Acknowledgments
+The AI discovers the new endpoint from the MCP registry on the next run and incorporates it into its assessment reasoning automatically.
 
-- OWASP for ZAP
-- Rapid7 for Metasploit
-- Nmap Project
-- Anthropic for Claude AI
-- MCP Protocol contributors
+---
 
-## 📧 Contact
+## Rate limit configuration
 
-For questions or support, please open an issue on GitHub.
+Each MCP server respects an environment variable ceiling (requests per minute):
+
+| Server | Env var | Default |
+|---|---|---|
+| `nmap_server.py` | `NMAP_MCP_RATE_LIMIT` | 15 |
+| `zap_server.py` | `ZAP_MCP_RATE_LIMIT` | 10 |
+| `metasploit_server.py` | `MSF_MCP_RATE_LIMIT` | 5 |
+| `auxiliary_tools_server.py` | `AUX_MCP_RATE_LIMIT` | 20 |
+
+---
+
+## Disclaimer
+
+This framework is provided for authorized security testing and educational purposes only. Users must obtain explicit written permission before testing any system. The authors are not responsible for misuse or any damage caused by this tool.
