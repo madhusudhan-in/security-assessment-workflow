@@ -106,8 +106,9 @@ pip install wafw00f
 # OWASP ZAP — download from https://www.zaproxy.org/download/
 
 # Metasploit Framework
-curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall
-chmod 755 msfinstall && sudo ./msfinstall
+curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall && \
+  chmod 755 msfinstall && \
+  ./msfinstall
 ```
 
 **Python 3.10+** with packages from `requirements.txt`:
