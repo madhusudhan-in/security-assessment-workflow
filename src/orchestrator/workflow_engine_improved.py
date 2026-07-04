@@ -5,7 +5,6 @@ This module orchestrates security tools and makes intelligent decisions using AI
 It provides a comprehensive workflow for security assessments including reconnaissance,
 vulnerability assessment, exploitation, and reporting.
 
-Author: Security Assessment Team
 Version: 2.0.0
 """
 
