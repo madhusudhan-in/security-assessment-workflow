@@ -310,6 +310,20 @@ class WorkflowEngine:
         if self._exploit_search is None:
             self._exploit_search = ExploitSearch()
         return self._exploit_search
+
+    @property
+    def msf(self) -> MetasploitWrapper:
+        """Lazy-load Metasploit wrapper."""
+        if self._msf is None:
+            msf_cfg = self.config.get('tools', {}).get('metasploit', {})
+            self._msf = MetasploitWrapper(
+                host=msf_cfg.get('host', 'localhost'),
+                port=msf_cfg.get('port', 55553),
+                username=msf_cfg.get('username', 'msf'),
+                password=msf_cfg.get('password', ''),
+                ssl=msf_cfg.get('ssl', True),
+            )
+        return self._msf
     
     def _load_config(self) -> Dict[str, Any]:
         """
@@ -398,17 +412,26 @@ class WorkflowEngine:
         
         try:
             # Initialize workflow configuration
-            stages = self._get_stages_for_mode(mode, custom_stages)
+            auto_exploit = self.config['workflow'].get('auto_exploit', False)
+            stages = self._get_stages_for_mode(mode, custom_stages, auto_exploit)
             self.current_workflow = WorkflowConfig(
                 target=target,
                 mode=WorkflowMode(mode),
                 stages=stages,
-                auto_exploit=self.config['workflow'].get('auto_exploit', False),
+                auto_exploit=auto_exploit,
                 max_concurrent=self.config['workflow'].get('max_concurrent_scans', 3),
                 timeout=self.config['workflow'].get('timeout', 7200),
                 retry_attempts=self.config['workflow'].get('retry_attempts', 3)
             )
-            
+
+            # Authorization check — runs before any tool is invoked
+            if not self._check_authorization(target):
+                raise WorkflowEngineError(
+                    f"Target '{target}' is not in the authorization file. "
+                    "Add it to config/authorized_targets.txt before running."
+                )
+            logger.info(f"Authorization confirmed for target: {target}")
+
             # Reset state
             self.findings = {}
             self.errors = []
@@ -475,27 +498,43 @@ class WorkflowEngine:
     def _get_stages_for_mode(
         self,
         mode: str,
-        custom_stages: Optional[List[str]] = None
+        custom_stages: Optional[List[str]] = None,
+        auto_exploit: bool = False,
     ) -> List[WorkflowStage]:
-        """Get workflow stages based on mode."""
+        """Get workflow stages based on mode.
+
+        The EXPLOITATION stage is included only when BOTH conditions hold:
+        - mode is 'aggressive'
+        - auto_exploit is True in configuration
+
+        This matches the blog's stated gate: "only reached in aggressive mode
+        with the flag set."
+        """
         if mode == "custom" and custom_stages:
             return [WorkflowStage(s) for s in custom_stages]
-        
+
+        base_aggressive = [
+            WorkflowStage.RECONNAISSANCE,
+            WorkflowStage.VULNERABILITY_ASSESSMENT,
+            WorkflowStage.EXPLOITATION,
+            WorkflowStage.REPORTING,
+        ]
+        aggressive_no_exploit = [
+            WorkflowStage.RECONNAISSANCE,
+            WorkflowStage.VULNERABILITY_ASSESSMENT,
+            WorkflowStage.REPORTING,
+        ]
+
         stage_map = {
             "quick": [WorkflowStage.RECONNAISSANCE, WorkflowStage.REPORTING],
             "full": [
                 WorkflowStage.RECONNAISSANCE,
                 WorkflowStage.VULNERABILITY_ASSESSMENT,
-                WorkflowStage.REPORTING
+                WorkflowStage.REPORTING,
             ],
-            "aggressive": [
-                WorkflowStage.RECONNAISSANCE,
-                WorkflowStage.VULNERABILITY_ASSESSMENT,
-                WorkflowStage.EXPLOITATION,
-                WorkflowStage.REPORTING
-            ]
+            "aggressive": base_aggressive if auto_exploit else aggressive_no_exploit,
         }
-        
+
         return stage_map.get(mode, stage_map["full"])
     
     async def _execute_stage(
@@ -817,10 +856,60 @@ class WorkflowEngine:
         target: str,
         http_ports: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Perform web application vulnerability scanning."""
-        # Placeholder for ZAP integration
-        logger.info(f"Web scan would be performed on {len(http_ports)} HTTP services")
-        return []
+        """
+        Perform web application vulnerability scanning via OWASP ZAP.
+
+        For each HTTP/HTTPS port discovered, constructs a target URL and runs a
+        full ZAP scan (spider + active scan). Results are normalized into the
+        same severity schema used by the CVE pipeline.
+
+        Requires zap.api_key and zap.enabled=true in config/config.yaml.
+        If ZAP is not configured the method returns an empty list silently.
+        """
+        zap_cfg = self.config.get('tools', {}).get('zap', {})
+        if not zap_cfg.get('enabled', False) or not zap_cfg.get('api_key'):
+            logger.info("ZAP not enabled/configured — skipping web application scan")
+            return []
+
+        from tools.zap_wrapper import ZAPWrapper
+
+        zap = ZAPWrapper(
+            api_key=zap_cfg['api_key'],
+            proxy_host=zap_cfg.get('proxy_host', 'localhost'),
+            proxy_port=zap_cfg.get('proxy_port', 8080),
+        )
+        all_alerts: List[Dict[str, Any]] = []
+
+        for port_info in http_ports:
+            port_num = port_info.get('port', 80)
+            scheme = 'https' if port_info.get('service') in ('https', 'ssl/http') else 'http'
+            url = f"{scheme}://{target}:{port_num}"
+
+            logger.info(f"Running ZAP full scan on {url}")
+            try:
+                scan_result = await asyncio.to_thread(zap.full_scan, url)
+
+                for alert in scan_result.alerts:
+                    all_alerts.append({
+                        'url': alert.url,
+                        'name': alert.name,
+                        'risk': alert.risk,
+                        'confidence': alert.confidence,
+                        'description': alert.description,
+                        'solution': alert.solution,
+                        'cwe_id': alert.cwe_id,
+                        'wasc_id': alert.wasc_id,
+                        'param': alert.param,
+                        'evidence': alert.evidence,
+                        'port': port_num,
+                    })
+
+                logger.info(f"ZAP scan on {url} found {len(scan_result.alerts)} alerts")
+
+            except Exception as e:
+                logger.warning(f"ZAP scan failed for {url}: {e}")
+
+        return all_alerts
     
     def _normalize_severity(self, severity: Optional[str], cvss_score: float) -> str:
         """Normalize severity to standard levels."""
@@ -928,20 +1017,265 @@ class WorkflowEngine:
         target: str,
         exploit_info: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Execute a single exploit (placeholder for Metasploit integration)."""
-        # Placeholder - actual implementation would use Metasploit
-        logger.info(f"Exploit execution placeholder for: {exploit_info.get('exploit_id')}")
+        """
+        Execute a single exploit via Metasploit using a two-phase check→run gate.
+
+        Phase 1 — check mode:
+            Calls exploit.check() (read-only probe). If the target is not
+            confirmed vulnerable, execution stops here.
+
+        Phase 2 — operator approval:
+            Prints the check result and waits for explicit operator input.
+            Only 'yes' proceeds; anything else aborts.
+
+        Phase 3 — run:
+            Calls exploit.execute() only after the operator approves.
+        """
+        module_name = exploit_info.get('module_name') or exploit_info.get('exploit_id', '')
+        options: Dict[str, Any] = exploit_info.get('options', {})
+
+        if not module_name:
+            return {'success': False, 'error': 'No module_name in exploit_info'}
+
+        logger.info(f"[Phase 1] Running check mode for module: {module_name} against {target}")
+
+        # ── Phase 1: check mode ──────────────────────────────────────────────
+        loop = asyncio.get_running_loop()
+        check_result: Dict[str, Any] = await loop.run_in_executor(
+            None,
+            lambda: self.msf.check_exploit(module_name, target, options)
+        )
+
+        if check_result.get('error'):
+            logger.warning(f"check_exploit error: {check_result['error']}")
+            return {
+                'success': False,
+                'phase': 'check',
+                'error': check_result['error'],
+                'module': module_name,
+            }
+
+        vulnerable = check_result.get('vulnerable', False)
+        check_output = check_result.get('result', '(no output)')
+
+        logger.info(
+            f"[Phase 1] check result — vulnerable={vulnerable} | output={check_output}"
+        )
+
+        if not vulnerable:
+            logger.info(f"Target not confirmed vulnerable by check; skipping {module_name}")
+            return {
+                'success': False,
+                'phase': 'check',
+                'vulnerable': False,
+                'check_output': str(check_output),
+                'module': module_name,
+            }
+
+        # ── Phase 2: operator approval ───────────────────────────────────────
+        prompt_lines = [
+            "",
+            "=" * 60,
+            f"  MODULE  : {module_name}",
+            f"  TARGET  : {target}",
+            f"  CHECK   : {check_output}",
+            "  Status  : Target CONFIRMED VULNERABLE",
+            "",
+            "  Proceed with live exploitation? [yes/no]: ",
+            "=" * 60,
+        ]
+        print("\n".join(prompt_lines))
+
+        try:
+            answer = await loop.run_in_executor(None, input, "  Your choice: ")
+        except EOFError:
+            # Non-interactive environment — default to abort
+            answer = "no"
+
+        answer = answer.strip().lower()
+
+        if answer != "yes":
+            logger.warning(
+                f"[Phase 2] Operator declined exploitation of {module_name} against {target}"
+            )
+            return {
+                'success': False,
+                'phase': 'operator_declined',
+                'vulnerable': True,
+                'check_output': str(check_output),
+                'module': module_name,
+            }
+
+        # ── Phase 3: live exploitation ───────────────────────────────────────
+        logger.warning(
+            f"[Phase 3] Operator APPROVED — executing {module_name} against {target}"
+        )
+
+        payload = exploit_info.get('payload')
+        exploit_result = await loop.run_in_executor(
+            None,
+            lambda: self.msf.run_exploit(module_name, target, options, payload)
+        )
+
         return {
-            'success': False,
-            'note': 'Metasploit integration required for actual exploitation'
+            'success': exploit_result.success,
+            'phase': 'run',
+            'vulnerable': True,
+            'check_output': str(check_output),
+            'module': module_name,
+            'session_id': exploit_result.session_id,
+            'output': exploit_result.output,
+            'error': exploit_result.error,
         }
     
     async def _stage_reporting(self) -> Dict[str, Any]:
-        """Stage 4: Generate comprehensive report."""
+        """
+        Stage 4: Generate comprehensive report.
+
+        Writes two files to the reports/ directory:
+        - <workflow_id>.json  — full WorkflowResult dataclass as JSON
+        - <workflow_id>.md    — Markdown executive summary with remediation checklist
+
+        Both derive from the same WorkflowResult object so the narrative and
+        data are always consistent.
+        """
+        if self.current_workflow is None:
+            return {'report_generated': False, 'error': 'No active workflow'}
+
+        try:
+            # Derive AI synthesis across all accumulated findings
+            ai_summary = await self._ai_synthesize_report(self.findings)
+
+            # Build the WorkflowResult we will serialize
+            end_time = datetime.now()
+            duration = (
+                end_time -
+                datetime.fromisoformat(
+                    self.findings.get('reconnaissance', {})
+                        .get('scan_metadata', {})
+                        .get('start_time', end_time.isoformat())
+                )
+            ).total_seconds()
+
+            risk_score = ai_summary.get('risk_score', 0.0)
+            result = WorkflowResult(
+                workflow_id=self._generate_workflow_id(self.current_workflow.target),
+                target=self.current_workflow.target,
+                start_time=self.findings.get('reconnaissance', {})
+                           .get('scan_metadata', {})
+                           .get('start_time', end_time.isoformat()),
+                end_time=end_time.isoformat(),
+                duration_seconds=duration,
+                stages_completed=[s.value for s in self.current_workflow.stages
+                                   if s != WorkflowStage.REPORTING],
+                findings=self.findings,
+                recommendations=ai_summary.get('recommendations', []),
+                risk_score=risk_score,
+                risk_level=self._get_risk_level(risk_score).value,
+                summary=ai_summary.get('summary', ''),
+                errors=self.errors,
+                metadata={
+                    'mode': self.current_workflow.mode.value,
+                    'config_path': str(self.config_path),
+                    'ai_model': self.config['api']['model'],
+                },
+            )
+
+            # Ensure output directory exists
+            reports_dir = Path('reports')
+            reports_dir.mkdir(exist_ok=True)
+
+            json_path = reports_dir / f"{result.workflow_id}.json"
+            md_path = reports_dir / f"{result.workflow_id}.md"
+
+            result.to_json(str(json_path))
+            result.to_markdown(str(md_path))
+
+            logger.info(f"Reports written: {json_path} | {md_path}")
+
+            return {
+                'report_generated': True,
+                'timestamp': end_time.isoformat(),
+                'json_report': str(json_path),
+                'markdown_report': str(md_path),
+                'risk_score': risk_score,
+                'risk_level': result.risk_level,
+                'summary': result.summary,
+            }
+
+        except Exception as e:
+            error_msg = f"Reporting stage error: {e}"
+            logger.error(error_msg, exc_info=True)
+            return {'report_generated': False, 'error': error_msg}
+
+    async def _ai_synthesize_report(self, findings: Dict[str, Any]) -> Dict[str, Any]:
+        """Ask the AI to synthesize all stage findings into a final risk score and summary."""
+        recon = findings.get('reconnaissance', {})
+        vuln = findings.get('vulnerability_assessment', {})
+        exploit = findings.get('exploitation', {})
+
+        severity = vuln.get('severity_summary', {})
+        total_cves = len(vuln.get('cves', []))
+        total_exploits = len(vuln.get('exploits', []))
+        successful_exploits = len(exploit.get('successful_exploits', [])) if exploit else 0
+
+        prompt = f"""
+You are producing the final report for a security assessment. Synthesize all findings below.
+
+TARGET: {self.current_workflow.target if self.current_workflow else 'unknown'}
+
+RECONNAISSANCE SUMMARY:
+- Open ports: {len(recon.get('open_ports', []))}
+- OS detected: {recon.get('os_detection', 'unknown')}
+- Services: {json.dumps([s.get('service') for s in recon.get('services', [])[:10]], indent=2)}
+
+VULNERABILITY SUMMARY:
+- Total CVEs: {total_cves}
+- Severity breakdown: {json.dumps(severity, indent=2)}
+- Exploits available: {total_exploits}
+- Successful exploit attempts: {successful_exploits}
+
+Top CVEs:
+{json.dumps(vuln.get('cves', [])[:5], indent=2)}
+
+TASKS:
+1. Produce an executive summary (3-5 sentences, non-technical language).
+2. Calculate a composite risk score from 0.0 to 10.0 based on severity counts and exploit availability.
+3. Provide a prioritized, numbered remediation checklist (max 10 items, specific and actionable).
+
+Respond ONLY as valid JSON with keys: "summary" (string), "risk_score" (float), "recommendations" (list of strings).
+"""
+        try:
+            response = await self._call_ai_with_retry(prompt, max_tokens=2000)
+            # Try to parse JSON from the AI response
+            import re as _re
+            json_match = _re.search(r'\{.*\}', response, _re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+        except Exception as e:
+            logger.warning(f"AI report synthesis failed: {e}")
+
+        # Fallback: compute locally without AI
+        score = self._calculate_risk_score_from_severity(severity)
         return {
-            'report_generated': True,
-            'timestamp': datetime.now().isoformat()
+            'summary': (
+                f"Assessment of {self.current_workflow.target if self.current_workflow else 'target'} "
+                f"identified {total_cves} CVEs across {len(recon.get('open_ports', []))} open ports. "
+                f"Risk score: {score:.1f}/10."
+            ),
+            'risk_score': score,
+            'recommendations': self._extract_recommendations(
+                vuln.get('ai_analysis', {}).get('analysis', '')
+            ),
         }
+
+    def _calculate_risk_score_from_severity(self, severity: Dict[str, int]) -> float:
+        """Compute a 0–10 risk score from severity counts."""
+        weights = {'critical': 10.0, 'high': 7.0, 'medium': 4.0, 'low': 1.5, 'info': 0.1}
+        raw = sum(weights.get(k, 0) * v for k, v in severity.items())
+        # Normalise: cap at 10, use sqrt to avoid runaway scores
+        import math
+        return min(round(math.sqrt(raw), 1), 10.0)
     
     async def _ai_decide_next_steps(self, recon_results: Dict[str, Any]) -> Dict[str, Any]:
         """Use AI to decide next steps based on reconnaissance."""
@@ -1236,34 +1570,71 @@ Format the response as structured text with clear sections.
     
     def _check_authorization(self, target: str) -> bool:
         """
-        Check if we have authorization to test target.
-        
+        Check if we have authorization to test the given target.
+
+        Supports three entry formats in the authorization file:
+        - Exact hostname or IP:  192.168.1.10  /  testlab.example.com
+        - CIDR block:            10.0.0.0/24   /  192.168.0.0/16
+        - Wildcard hostname:     *.internal.example.com
+
+        Lines beginning with '#' are treated as comments and ignored.
+
         Args:
-            target: Target to check authorization for
-            
+            target: Hostname, IP, or URL to check.
+
         Returns:
-            True if authorized, False otherwise
+            True if the target is authorized, False otherwise.
         """
+        import ipaddress
+        import re as _re
+
         auth_file = self.config.get('safety', {}).get('authorization_file')
-        
+
         if not auth_file:
             logger.warning("No authorization file configured")
             return False
-        
+
         auth_path = Path(auth_file)
         if not auth_path.exists():
             logger.warning(f"Authorization file not found: {auth_file}")
             return False
-        
+
+        # Strip URL scheme so "https://10.0.0.5/path" -> "10.0.0.5"
+        clean_target = target
+        if '://' in clean_target:
+            clean_target = clean_target.split('://', 1)[1].split('/')[0].split(':')[0]
+
         try:
             with open(auth_path, 'r') as f:
-                authorized_targets = {line.strip() for line in f if line.strip() and not line.startswith('#')}
-                
-                # Check exact match or wildcard patterns
-                if target in authorized_targets:
+                entries = {
+                    line.strip() for line in f
+                    if line.strip() and not line.startswith('#')
+                }
+
+            for entry in entries:
+                # 1. Exact match
+                if clean_target == entry:
                     return True
-                
-                # Check for wildcard matches (simplified)
-                for auth_target in authorized_targets:
-                    if '*' in auth_target:
-                        pattern = auth_target.replace('.', '[.]').replace('*', '.*')
+
+                # 2. CIDR block
+                if '/' in entry:
+                    try:
+                        network = ipaddress.ip_network(entry, strict=False)
+                        target_addr = ipaddress.ip_address(clean_target)
+                        if target_addr in network:
+                            return True
+                    except ValueError:
+                        pass  # entry is not a valid CIDR; skip
+
+                # 3. Wildcard hostname (e.g. *.example.com)
+                if '*' in entry:
+                    pattern = _re.escape(entry).replace(r'\*', '.*')
+                    if _re.fullmatch(pattern, clean_target):
+                        return True
+
+            logger.warning(f"Target '{clean_target}' not found in authorization file")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error checking authorization: {e}")
+            return False

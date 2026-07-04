@@ -1,0 +1,27 @@
+# authorized_targets.txt
+#
+# This file controls which targets the security assessment workflow is
+# permitted to scan and exploit.  Every run checks this file BEFORE any
+# tool is invoked.  If the target is not listed here, the workflow exits
+# immediately with an authorization error.
+#
+# Supported formats:
+#   Exact IP        192.168.1.10
+#   Exact hostname  testlab.example.com
+#   CIDR block      10.0.0.0/24
+#   Wildcard host   *.internal.example.com
+#
+# Lines beginning with '#' are comments and are ignored.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ADD YOUR AUTHORIZED TARGETS BELOW
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Local loopback — safe for smoke-testing the workflow itself
+127.0.0.1
+
+# Example lab targets (replace with your own)
+# 192.168.100.0/24
+# 10.10.10.5
+# dvwa.internal.lab
+# *.pentest.lab

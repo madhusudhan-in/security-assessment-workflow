@@ -1,11 +1,13 @@
 """
 MCP Server for Nmap Integration
-Provides tools for network scanning and reconnaissance via MCP protocol
+Provides tools for network scanning and reconnaissance via MCP protocol.
 """
 
 import asyncio
 import json
 import logging
+import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 from mcp.server import Server
 from mcp.types import Tool, TextContent
@@ -26,6 +28,26 @@ app = Server("nmap-security-scanner")
 
 # Initialize Nmap wrapper
 nmap_wrapper = NmapWrapper()
+
+# ── Per-tool rate limiter ────────────────────────────────────────────────────
+# Prevents the AI from issuing an unbounded stream of scan requests that
+# could accidentally DoS the target or the local network.
+_RATE_LIMIT_PER_MIN = int(os.getenv("NMAP_MCP_RATE_LIMIT", "15"))
+_request_timestamps: deque = deque()
+
+
+def _check_rate_limit() -> None:
+    """Raise RuntimeError if the per-minute request budget is exceeded."""
+    now = time.monotonic()
+    # Drop entries older than 60 s
+    while _request_timestamps and now - _request_timestamps[0] > 60:
+        _request_timestamps.popleft()
+    if len(_request_timestamps) >= _RATE_LIMIT_PER_MIN:
+        raise RuntimeError(
+            f"Nmap MCP rate limit reached ({_RATE_LIMIT_PER_MIN} req/min). "
+            "The AI cannot issue further scan requests until the window resets."
+        )
+    _request_timestamps.append(now)
 
 
 @app.list_tools()
@@ -156,9 +178,11 @@ async def list_tools() -> List[Tool]:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-    """Handle tool calls"""
-    
+    """Handle tool calls with per-tool rate limiting."""
+
     try:
+        _check_rate_limit()
+
         if name == "nmap_quick_scan":
             target = arguments["target"]
             logger.info(f"Executing quick scan on {target}")
@@ -278,4 +302,3 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
-# Made with Bob

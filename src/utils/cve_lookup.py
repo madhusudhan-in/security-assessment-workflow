@@ -335,4 +335,3 @@ if __name__ == "__main__":
         print(f"Description: {cve.description[:200]}...")
         print(f"Exploits available: {cve.exploits_available}")
 
-# Made with Bob
