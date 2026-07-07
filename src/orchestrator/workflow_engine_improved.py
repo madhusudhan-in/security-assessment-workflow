@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 AI-Powered Security Assessment Workflow Engine
 
@@ -5,8 +6,20 @@ This module orchestrates security tools and makes intelligent decisions using AI
 It provides a comprehensive workflow for security assessments including reconnaissance,
 vulnerability assessment, exploitation, and reporting.
 
+Author: Security Assessment Team
 Version: 2.0.0
 """
+# Ensure the project's .venv site-packages are on sys.path when running
+# with the system Python (i.e. without activating the virtualenv first).
+import sys as _sys, os as _os
+_project_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+_venv_site = _os.path.join(_project_root, ".venv", "lib")
+if _os.path.isdir(_venv_site):
+    for _entry in _os.listdir(_venv_site):               # e.g. "python3.13"
+        _sp = _os.path.join(_venv_site, _entry, "site-packages")
+        if _os.path.isdir(_sp) and _sp not in _sys.path:
+            _sys.path.insert(0, _sp)
+del _project_root, _venv_site
 
 import asyncio
 import logging
